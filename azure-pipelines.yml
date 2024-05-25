@@ -1,0 +1,178 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  amlcompute.clusterName: 'amlcluster'
+  amlcompute.idleSecondsBeforeScaledown: 120
+  amlcompute.maxNodes: 2
+  amlcompute.minNodes: 0
+  amlcompute.vmSize: 'Standard_F4s_v2'
+  azureml.location: 'centralus'
+  azureml.resourceGroup: 'mlops-RG'
+  azureml.workspaceName: 'mlops-AML-WS'
+  experiment.name: 'insurance_classification'
+  model.name: 'insurance_model'
+
+stages:
+# Build Stage
+- stage: CI
+  jobs:
+  - job: Build
+    steps:
+    - script: echo Hello, world!
+      displayName: 'Run a one-line script'
+
+    - script: |
+        echo Add other tasks to build, test, and deploy your project.
+        echo See https://aka.ms/yaml
+      displayName: 'Run a multi-line script'
+
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.9'
+        addToPath: true
+        architecture: 'x64'
+
+    - script: |
+        pwd
+        ls ./
+      displayName: 'Show current directory and list files'
+
+    - task: Bash@3
+      inputs:
+        filePath: 'package_requirement/install_requirements.sh'
+        workingDirectory: 'package_requirement'
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: 'pytest training/train_test.py --doctest-modules --junitxml=junit/test-results.xml --cov=data_test --cov-report=xml --cov-report=html'
+
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/test-*.xml'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: 'az extension add -n azure-cli-ml'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml workspace create -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -l $(azureml.location) --exist-ok --yes
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml computetarget create amlcompute -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -n $(amlcompute.clusterName) -s $(amlcompute.vmSize) --min-nodes $(amlcompute.minNodes) --max-nodes $(amlcompute.maxNodes) --idle-seconds-before-scaledown $(amlcompute.idleSecondsBeforeScaledown)
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml datastore upload -w $(azureml.workspaceName) -g $(azureml.resourceGroup) -n $(az ml datastore show-default -w $(azureml.workspaceName) -g $(azureml.resourceGroup) --query name -o tsv) -p data -u insurance --overwrite true
+
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: 'mkdir metadata && mkdir models'
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml run submit-script -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -e $(experiment.name) --ct $(amlcompute.clusterName) -d training/conda_dependencies.yml -t metadata/run.json training/train_aml.py
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml model register -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -n $(model.name) -f metadata/run.json --asset-path outputs/models/insurance_model.pkl -d "Classification model for filing a claim prediction" --tag "data"="insurance" --tag "model"="classification" --model-framework ScikitLearn -t metadata/model.json
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ml model download -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -i $(jq -r .modelId metadata/model.json) -t ./models --overwrite
+
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)'
+        Contents: |
+          **/metadata/*
+          **/models/*
+          **/deployment/*
+          **/test/integration/*
+          **/package_requirement/*
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+        artifact: 'landing'
+        publishLocation: 'pipeline'
+
+# Deployment Stage
+- stage: CD
+  jobs:
+  - deployment: AciDeployment
+    environment: 'aci-prod' # Define your environment name
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+              addToPath: true
+              architecture: 'x64'
+          
+          - script: |
+              pwd
+              ls ./
+              ls ../landing
+            displayName: 'Show current directory and list files'
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'azure-resource-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: 'az extension add -n azure-cli-ml'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'azure-resource-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az ml model deploy -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -n insurance-aci --model $(model.name):8 --compute-target $(amlcompute.clusterName) --overwrite --dc ../landing/deployment/aciDeploymentConfigStaging.yml --ic ../landing/deployment/inferenceConfig.yml
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'azure-resource-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az ml endpoint realtime show -g $(azureml.resourceGroup) -w $(azureml.workspaceName) -n insurance-aci
+
