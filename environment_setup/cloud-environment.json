@@ -40,11 +40,11 @@
     },
     "appInsights": {
       "type": "string",
-      "defaultValue": "[concat(parameters('baseName'),'-AML-AI')]"
+      "defaultValue": "[concat(parameters('baseName'),'21521333')]"
     },
     "acr": {
       "type": "string",
-      "defaultValue": "[concat(toLower(parameters('baseName')),'amlcr')]"
+      "defaultValue": "[concat(toLower(parameters('baseName')),'21521333')]"
     },
     "sku": {
       "type": "string",

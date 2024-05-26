@@ -63,7 +63,7 @@ def main():
     print("Getting training parameters")
 
     # Load the training parameters from the parameters file
-    with open("parameters.json") as f:
+    with open("training/parameters.json") as f:
         pars = json.load(f)
     try:
         train_args = pars["training"]
